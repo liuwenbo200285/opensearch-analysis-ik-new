@@ -33,6 +33,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.Files;
+import java.nio.charset.Charset;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
@@ -56,6 +57,11 @@ import org.opensearch.plugin.analysis.ik.AnalysisIkPlugin;
 import org.wltea.analyzer.cfg.Configuration;
 import org.apache.logging.log4j.Logger;
 import org.wltea.analyzer.help.OpenSearchPluginLoggerFactory;
+import okhttp3.Call;
+import okhttp3.ConnectionPool;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
 
 
 /**
@@ -95,9 +101,19 @@ public class Dictionary {
 	private final static  String REMOTE_EXT_DICT = "remote_ext_dict";
 	private final static  String EXT_STOP = "ext_stopwords";
 	private final static  String REMOTE_EXT_STOP = "remote_ext_stopwords";
-
+	
+	private static OkHttpClient client = null;
+	
 	private Path conf_dir;
 	private Properties props;
+	
+	static {
+		client = new OkHttpClient.Builder()
+		        .connectTimeout(10 * 1000,TimeUnit.MILLISECONDS)
+		        .readTimeout(60 * 1000,TimeUnit.MILLISECONDS)
+		        .connectionPool(new ConnectionPool(50,5,TimeUnit.MINUTES))
+		        .build();
+	}
 
 	private Dictionary(Configuration cfg) {
 		this.configuration = cfg;
@@ -435,7 +451,7 @@ public class Dictionary {
 	private static List<String> getRemoteWords(String location) {
 		SpecialPermission.check();
 		return AccessController.doPrivileged((PrivilegedAction<List<String>>) () -> {
-			return getRemoteWordsUnprivileged(location);
+			return getRemoteWordsUnprivilegedByOkhttp(location);
 		});
 	}
 
@@ -443,7 +459,6 @@ public class Dictionary {
 	 * 从远程服务器上下载自定义词条
 	 */
 	private static List<String> getRemoteWordsUnprivileged(String location) {
-
 		List<String> buffer = new ArrayList<String>();
 		RequestConfig rc = RequestConfig.custom().setConnectionRequestTimeout(10 * 1000).setConnectTimeout(10 * 1000)
 				.setSocketTimeout(60 * 1000).build();
@@ -486,6 +501,28 @@ public class Dictionary {
 		}
 		return buffer;
 	}
+	
+	private static List<String> getRemoteWordsUnprivilegedByOkhttp(String location) {
+		String charset = "UTF-8";
+		List<String> buffer = new ArrayList<String>();
+		Request request = new Request.Builder().url(location).build();
+		Call call = client.newCall(request);
+		try(Response response = call.execute()){
+			if(response.isSuccessful()) {
+				BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(response.body().byteStream(),response.body().contentType().charset(Charset.forName(charset))));
+				String line;
+				while ((line = bufferedReader.readLine()) != null) {
+					buffer.add(line);
+				}
+			}else {
+				logger.error("getRemoteWordsUnprivilegedByOkhttp response error!{}",location);
+			}
+		}catch (Exception e) {
+			logger.error("getRemoteWordsUnprivilegedByOkhttp {} error", e, location);
+		}
+		return buffer;
+	}
+	
 
 	/**
 	 * 加载用户扩展的停止词词典
